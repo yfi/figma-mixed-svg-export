@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+    font-size: 12px;
+    color: #333;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    height: 100vh;
+  }
+  h2 { font-size: 14px; font-weight: 600; }
+  .control { display: flex; flex-direction: column; gap: 4px; }
+  .control label { font-weight: 500; color: #666; }
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  input[type="range"] { flex: 1; }
+  .quality-val { font-variant-numeric: tabular-nums; min-width: 32px; }
+  button {
+    background: #18A0FB;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #0d8de5; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  #status {
+    padding: 8px 10px;
+    background: #f5f5f5;
+    border-radius: 6px;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    color: #666;
+    line-height: 1.4;
+  }
+  #stats {
+    font-size: 11px;
+    color: #999;
+    display: none;
+  }
+  #stats.visible { display: block; }
+  .stat-row { display: flex; justify-content: space-between; padding: 2px 0; }
+  .stat-label { color: #888; }
+  .stat-value { font-weight: 500; color: #333; }
+  .savings { color: #1bc47d; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h2>SVG Export with Optimized Bitmaps</h2>
+
+  <div class="control">
+    <label>WebP Quality</label>
+    <div class="slider-row">
+      <input type="range" id="quality" min="0.3" max="1.0" step="0.05" value="0.85" />
+      <span class="quality-val" id="qualityLabel">0.85</span>
+    </div>
+  </div>
+
+  <button id="exportBtn">Export Selection as SVG</button>
+
+  <div id="status">Select a frame or group, then click Export.</div>
+
+  <div id="stats">
+    <div class="stat-row">
+      <span class="stat-label">Original SVG size</span>
+      <span class="stat-value" id="origSize">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Optimized SVG size</span>
+      <span class="stat-value" id="optSize">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Savings</span>
+      <span class="stat-value savings" id="savings">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Images converted</span>
+      <span class="stat-value" id="imgCount">—</span>
+    </div>
+  </div>
+
+  <canvas id="canvas" style="display:none"></canvas>
+
+<script>
+  const qualitySlider = document.getElementById('quality');
+  const qualityLabel = document.getElementById('qualityLabel');
+  const exportBtn = document.getElementById('exportBtn');
+  const statusEl = document.getElementById('status');
+  const statsEl = document.getElementById('stats');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  qualitySlider.oninput = () => {
+    qualityLabel.textContent = qualitySlider.value;
+  };
+
+  exportBtn.onclick = () => {
+    exportBtn.disabled = true;
+    statusEl.textContent = 'Starting export...';
+    statsEl.classList.remove('visible');
+    parent.postMessage({
+      pluginMessage: {
+        type: 'export',
+        quality: parseFloat(qualitySlider.value)
+      }
+    }, '*');
+  };
+
+  onmessage = async (event) => {
+    const msg = event.data.pluginMessage;
+    if (!msg) return;
+
+    if (msg.type === 'status') {
+      statusEl.textContent = msg.message;
+    } else if (msg.type === 'error') {
+      statusEl.textContent = '⚠ ' + msg.message;
+      exportBtn.disabled = false;
+    } else if (msg.type === 'process') {
+      await processAndDownload(msg);
+    }
+  };
+
+  async function processAndDownload({ svgString, images, quality, fileName }) {
+    const originalSize = new Blob([svgString]).size;
+
+    statusEl.textContent = `Converting ${images.length} image(s) to WebP...`;
+
+    // Convert each PNG to WebP base64
+    const webpDataUris = [];
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      statusEl.textContent = `Compressing image ${i + 1}/${images.length}: ${img.nodeName}`;
+
+      const dataUri = await pngBytesToWebpDataUri(
+        new Uint8Array(img.pngBytes),
+        img.width,
+        img.height,
+        quality
+      );
+      webpDataUris.push(dataUri);
+    }
+
+    statusEl.textContent = 'Replacing images in SVG...';
+
+    // Parse SVG and replace <image> hrefs
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgString, 'image/svg+xml');
+    const imageEls = doc.querySelectorAll('image');
+
+    // Figma exports images in tree order, matching our collection order
+    let replaced = 0;
+    for (let i = 0; i < imageEls.length && i < webpDataUris.length; i++) {
+      const el = imageEls[i];
+      el.setAttribute('href', webpDataUris[i]);
+      // Remove xlink:href if present (legacy)
+      el.removeAttributeNS('http://www.w3.org/1999/xlink', 'href');
+      replaced++;
+    }
+
+    // Serialize back to string
+    const serializer = new XMLSerializer();
+    const finalSvg = serializer.serializeToString(doc.documentElement);
+    const optimizedSize = new Blob([finalSvg]).size;
+
+    // Show stats
+    document.getElementById('origSize').textContent = formatBytes(originalSize);
+    document.getElementById('optSize').textContent = formatBytes(optimizedSize);
+    const pct = ((1 - optimizedSize / originalSize) * 100);
+    document.getElementById('savings').textContent =
+      pct > 0 ? `${pct.toFixed(1)}% smaller` : `${Math.abs(pct).toFixed(1)}% larger`;
+    document.getElementById('imgCount').textContent = replaced;
+    statsEl.classList.add('visible');
+
+    // Trigger download
+    const blob = new Blob([finalSvg], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${fileName}.svg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = `Done! Exported ${fileName}.svg (${replaced} image(s) optimized)`;
+    exportBtn.disabled = false;
+  }
+
+  function pngBytesToWebpDataUri(pngBytes, width, height, quality) {
+    return new Promise((resolve, reject) => {
+      const blob = new Blob([pngBytes], { type: 'image/png' });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+
+        const dataUri = canvas.toDataURL('image/webp', quality);
+        resolve(dataUri);
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('Failed to load image'));
+      };
+      img.src = url;
+    });
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+</script>
+</body>
+</html>
