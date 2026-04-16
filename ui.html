@@ -23,6 +23,27 @@
   }
   input[type="range"] { flex: 1; }
   .quality-val { font-variant-numeric: tabular-nums; min-width: 32px; }
+  .segmented {
+    display: flex;
+    border: 1px solid #e5e5e5;
+    border-radius: 6px;
+    overflow: hidden;
+    width: fit-content;
+  }
+  .segmented input { display: none; }
+  .segmented label {
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #666;
+    cursor: pointer;
+    user-select: none;
+  }
+  .segmented label + label { border-left: 1px solid #e5e5e5; }
+  .segmented input:checked + label {
+    background: #18A0FB;
+    color: white;
+  }
   button {
     background: #18A0FB;
     color: white;
@@ -60,6 +81,16 @@
 </head>
 <body>
   <h2>SVG Export with Optimized Bitmaps</h2>
+
+  <div class="control">
+    <label>Bitmap Resolution</label>
+    <div class="segmented">
+      <input type="radio" name="scale" id="scale1" value="1" checked />
+      <label for="scale1">1x</label>
+      <input type="radio" name="scale" id="scale2" value="2" />
+      <label for="scale2">2x</label>
+    </div>
+  </div>
 
   <div class="control">
     <label>WebP Quality</label>
@@ -111,10 +142,12 @@
     exportBtn.disabled = true;
     statusEl.textContent = 'Starting export...';
     statsEl.classList.remove('visible');
+    const scale = parseFloat(document.querySelector('input[name="scale"]:checked').value);
     parent.postMessage({
       pluginMessage: {
         type: 'export',
-        quality: parseFloat(qualitySlider.value)
+        quality: parseFloat(qualitySlider.value),
+        scale: scale
       }
     }, '*');
   };
