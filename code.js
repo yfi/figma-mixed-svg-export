@@ -1,12 +1,12 @@
-figma.showUI(__html__, { width: 400, height: 320 });
+figma.showUI(__html__, { width: 400, height: 420 });
 
 figma.ui.onmessage = async (msg) => {
   if (msg.type === 'export') {
-    await runExport(msg.quality || 0.85);
+    await runExport(msg.quality || 0.85, msg.scale || 1);
   }
 };
 
-async function runExport(quality) {
+async function runExport(quality, requestedScale) {
   const selection = figma.currentPage.selection;
 
   if (selection.length !== 1) {
@@ -42,18 +42,19 @@ async function runExport(quality) {
     message: `Found ${imageNodes.length} image(s). Exporting at display scale...`
   });
 
-  // Export each image node as PNG at 1x (display size)
+  // Export each image node as PNG, capped by the underlying bitmap's native size
   const imageData = [];
   for (let i = 0; i < imageNodes.length; i++) {
     const node = imageNodes[i];
+    const scale = await resolveExportScale(node, requestedScale);
     figma.ui.postMessage({
       type: 'status',
-      message: `Exporting image ${i + 1}/${imageNodes.length}: ${node.name}`
+      message: `Exporting image ${i + 1}/${imageNodes.length} @${scale.toFixed(2)}x: ${node.name}`
     });
 
     const pngBytes = await node.exportAsync({
       format: 'PNG',
-      constraint: { type: 'SCALE', value: 1 }
+      constraint: { type: 'SCALE', value: scale }
     });
 
     imageData.push({
@@ -72,6 +73,25 @@ async function runExport(quality) {
     quality: quality,
     fileName: sanitizeFileName(root.name)
   });
+}
+
+async function resolveExportScale(node, requestedScale) {
+  if (requestedScale <= 1) return 1;
+  if (!('fills' in node) || !Array.isArray(node.fills)) return requestedScale;
+
+  // Cap the scale so we never upscale beyond the largest underlying bitmap.
+  let maxFromImages = 0;
+  for (const fill of node.fills) {
+    if (fill.type !== 'IMAGE' || fill.visible === false || !fill.imageHash) continue;
+    const image = figma.getImageByHash(fill.imageHash);
+    if (!image) continue;
+    const { width, height } = await image.getSizeAsync();
+    const fit = Math.min(width / node.width, height / node.height);
+    if (fit > maxFromImages) maxFromImages = fit;
+  }
+
+  if (maxFromImages === 0) return requestedScale;
+  return Math.max(1, Math.min(requestedScale, maxFromImages));
 }
 
 function findImageNodes(node, result) {
