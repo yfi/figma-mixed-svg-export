@@ -8,5 +8,5 @@
   "capabilities": [],
   "documentAccess": "dynamic-page",
   "enableProposedApi": false,
-  "editorType": ["figma"]
+  "editorType": ["figma", "dev"]
 }
