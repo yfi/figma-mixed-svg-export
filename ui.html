@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <html>
 <head>
+<script>
+  window.svgoReady = new Promise((resolve, reject) => {
+    window.__svgoResolve = resolve;
+    window.__svgoReject = reject;
+  });
+</script>
+<script type="module">
+  import('https://esm.sh/svgo@3').then(
+    m => window.__svgoResolve(m.optimize),
+    e => window.__svgoReject(e)
+  );
+</script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -100,6 +112,18 @@
     </div>
   </div>
 
+  <div class="control">
+    <label>Detail Level (SVGO precision)</label>
+    <div class="segmented">
+      <input type="radio" name="detail" id="detailAuto" value="auto" checked />
+      <label for="detailAuto">Auto</label>
+      <input type="radio" name="detail" id="detail1" value="1" />
+      <label for="detail1">1</label>
+      <input type="radio" name="detail" id="detail2" value="2" />
+      <label for="detail2">2</label>
+    </div>
+  </div>
+
   <button id="exportBtn">Export Selection as SVG</button>
 
   <div id="status">Select a frame or group, then click Export.</div>
@@ -110,7 +134,11 @@
       <span class="stat-value" id="origSize">—</span>
     </div>
     <div class="stat-row">
-      <span class="stat-label">Optimized SVG size</span>
+      <span class="stat-label">After WebP</span>
+      <span class="stat-value" id="webpSize">—</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">After SVGO</span>
       <span class="stat-value" id="optSize">—</span>
     </div>
     <div class="stat-row">
@@ -133,6 +161,7 @@
   const statsEl = document.getElementById('stats');
   const canvas = document.getElementById('canvas');
   const ctx = canvas.getContext('2d');
+  let pendingDetail = 'auto';
 
   qualitySlider.oninput = () => {
     qualityLabel.textContent = qualitySlider.value;
@@ -143,6 +172,7 @@
     statusEl.textContent = 'Starting export...';
     statsEl.classList.remove('visible');
     const scale = parseFloat(document.querySelector('input[name="scale"]:checked').value);
+    pendingDetail = document.querySelector('input[name="detail"]:checked').value;
     parent.postMessage({
       pluginMessage: {
         type: 'export',
@@ -205,11 +235,16 @@
 
     // Serialize back to string
     const serializer = new XMLSerializer();
-    const finalSvg = serializer.serializeToString(doc.documentElement);
+    const webpSvg = serializer.serializeToString(doc.documentElement);
+    const webpSize = new Blob([webpSvg]).size;
+
+    statusEl.textContent = 'Running SVGO...';
+    const finalSvg = await runSvgo(webpSvg, pendingDetail);
     const optimizedSize = new Blob([finalSvg]).size;
 
     // Show stats
     document.getElementById('origSize').textContent = formatBytes(originalSize);
+    document.getElementById('webpSize').textContent = formatBytes(webpSize);
     document.getElementById('optSize').textContent = formatBytes(optimizedSize);
     const pct = ((1 - optimizedSize / originalSize) * 100);
     document.getElementById('savings').textContent =
@@ -230,6 +265,32 @@
 
     statusEl.textContent = `Done! Exported ${fileName}.svg (${replaced} image(s) optimized)`;
     exportBtn.disabled = false;
+  }
+
+  async function runSvgo(svgString, detail) {
+    let optimize;
+    try {
+      optimize = await Promise.race([
+        window.svgoReady,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000)),
+      ]);
+    } catch (e) {
+      statusEl.textContent = '⚠ SVGO failed to load, skipping optimization.';
+      return svgString;
+    }
+    const opts = {
+      multipass: true,
+      plugins: [
+        { name: 'preset-default', params: { overrides: { removeViewBox: false } } },
+      ],
+    };
+    if (detail !== 'auto') opts.floatPrecision = parseInt(detail, 10);
+    try {
+      return optimize(svgString, opts).data;
+    } catch (e) {
+      statusEl.textContent = '⚠ SVGO error, using un-optimized SVG: ' + e.message;
+      return svgString;
+    }
   }
 
   function pngBytesToWebpDataUri(pngBytes, width, height, quality) {

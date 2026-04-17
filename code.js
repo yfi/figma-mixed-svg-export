@@ -1,4 +1,4 @@
-figma.showUI(__html__, { width: 400, height: 320 });
+figma.showUI(__html__, { width: 400, height: 420 });
 
 figma.ui.onmessage = async (msg) => {
   if (msg.type === 'export') {

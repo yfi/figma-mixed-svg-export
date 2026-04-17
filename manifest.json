@@ -6,5 +6,9 @@
   "ui": "ui.html",
   "capabilities": [],
   "enableProposedApi": false,
-  "editorType": ["figma"]
+  "editorType": ["figma"],
+  "networkAccess": {
+    "allowedDomains": ["https://esm.sh"],
+    "reasoning": "Loads SVGO to optimize exported SVGs."
+  }
 }
