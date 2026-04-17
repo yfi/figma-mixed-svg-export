@@ -1,0 +1,24 @@
+{
+  "name": "figma",
+  "version": "1.0.0",
+  "description": "Figma plugin that exports to svg with compressed and sized bitmaps.",
+  "main": "code.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yfi/figma-mixed-svg-export.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/yfi/figma-mixed-svg-export/issues"
+  },
+  "homepage": "https://github.com/yfi/figma-mixed-svg-export#readme",
+  "dependencies": {
+    "@jsquash/avif": "^2.1.1"
+  }
+}

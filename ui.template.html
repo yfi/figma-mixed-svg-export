@@ -90,7 +90,7 @@
 <body>
   <div class="header">
     <h2>SVG Export with Optimized Bitmaps</h2>
-    <span class="version">v1.3.0</span>
+    <span class="version">v2.1.1</span>
   </div>
 
   <div class="control">
@@ -176,8 +176,6 @@
   const statsEl = document.getElementById('stats');
   const canvas = document.getElementById('canvas');
   const ctx = canvas.getContext('2d');
-  let pendingDetail = 'auto';
-
   // Defensive: ensure each radio group has exactly one selected option at
   // load. The HTML `checked` attribute is sometimes not honored when the
   // page loads in Figma's iframe with back-forward cache quirks.
@@ -199,15 +197,13 @@
     exportBtn.disabled = true;
     statusEl.textContent = 'Starting export...';
     statsEl.classList.remove('visible');
-    pendingDetail = document.querySelector('input[name="detail"]:checked').value;
-    const factor = parseFloat(document.querySelector('input[name="factor"]:checked').value);
-    const format = document.querySelector('input[name="format"]:checked').value;
     parent.postMessage({
       pluginMessage: {
         type: 'export',
         quality: parseFloat(qualitySlider.value),
-        factor: factor,
-        format: format
+        factor: parseFloat(document.querySelector('input[name="factor"]:checked').value),
+        format: document.querySelector('input[name="format"]:checked').value,
+        detail: document.querySelector('input[name="detail"]:checked').value,
       }
     }, '*');
   };
@@ -226,7 +222,7 @@
     }
   };
 
-  async function processAndDownload({ svgString, quality, factor, format, fileName }) {
+  async function processAndDownload({ svgString, images, quality, factor, format, detail, fileName }) {
     // Up-front format check — `canvas.toDataURL` silently returns PNG when
     // asked for a format the browser can't encode. Bail before doing any
     // work rather than producing a surprisingly huge "optimized" SVG.
@@ -237,7 +233,6 @@
     }
     const originalSize = new Blob([svgString]).size;
 
-    // Parse SVG
     const parser = new DOMParser();
     const doc = parser.parseFromString(svgString, 'image/svg+xml');
     const perr = doc.querySelector('parsererror');
@@ -247,91 +242,80 @@
       return;
     }
 
-    // Capture the root BEFORE mounting — once the element is moved into
-    // document.body, doc.documentElement becomes null and every later
-    // querySelector on it throws (which manifests as the UI "hanging"
-    // with the button stuck disabled).
     const svgRoot = doc.documentElement;
     const imageEls = Array.from(svgRoot.querySelectorAll('image'));
-    statusEl.textContent = `Recompressing ${imageEls.length} embedded image(s)...`;
+    const count = Math.min(imageEls.length, images.length);
+    if (imageEls.length !== images.length) {
+      console.warn(
+        `Image count mismatch: SVG has ${imageEls.length}, Figma exported ${images.length}. ` +
+        `Processing first ${count}; extras left untouched.`
+      );
+    }
 
-    // Mount the parsed SVG off-screen so getBBox() works for display-size
-    // measurement. We keep the hrefs pointing at the original (large)
-    // pixel data while measuring — the browser only uses dimensions.
-    const unmount = mountSvgForMeasure(svgRoot);
-
-    // Any thrown error below will jump to the finally block, which always
-    // unmounts and re-enables the export button so the UI never hangs.
     let replaced = 0;
     try {
-    for (let i = 0; i < imageEls.length; i++) {
-      const el = imageEls[i];
-      const currentHref =
-        el.getAttribute('href') ||
-        el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
-      if (!currentHref || !currentHref.startsWith('data:')) continue;
+      for (let i = 0; i < count; i++) {
+        const el = imageEls[i];
+        const entry = images[i];
+        const { bytes, nativeW, nativeH, targetMax, sampleNodeName } = entry;
+        const slow = format === 'image/avif' ? ' (AVIF is slow)' : '';
+        statusEl.textContent = `Image ${i + 1}/${count}: ${sampleNodeName}${slow}`;
 
-      // Compute the display size via getBBox on the consumer element(s),
-      // then target displaySize * factor. The native-resolution cap lives
-      // inside recompressDataUri against img.naturalWidth/Height — the
-      // <image> width/height attributes are a user-space display box
-      // (often "1" for pattern fills) and can't be used for that.
-      const display = measureMaxDisplaySize(svgRoot, el);
+        // Account for pattern zoom: a CROP-mode fill has a <use transform>
+        // that scales the native image by MORE than 1/native (i.e. the
+        // image is "zoomed in" past the pattern unit box, with most of it
+        // clipped). Only a 1/zoom slice of the image is visible through
+        // the pattern, so we need `zoom × display × factor` native pixels
+        // to hit sharp rendering of the visible slice. Without this,
+        // CROP fills get aggressively downsampled and go pixellated.
+        const zoom = computePatternZoom(svgRoot, el, nativeW, nativeH);
+        const adjustedMax = targetMax > 0 ? Math.ceil(targetMax * zoom) : 0;
 
-      let targetMax = 0; // 0 means "keep native"
-      if (factor > 0 && display && display.w > 0 && display.h > 0) {
-        targetMax = Math.ceil(Math.max(display.w, display.h) * factor);
-      }
+        const mime = sniffImageMime(bytes);
+        const blob = new Blob([bytes], { type: mime });
+        const url = URL.createObjectURL(blob);
+        let result;
+        try {
+          result = await recompressDataUri(url, quality, adjustedMax, format);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
 
-      const slow = format === 'image/avif' ? ' (AVIF is slow)' : '';
-      statusEl.textContent = display
-        ? `Image ${i + 1}/${imageEls.length}: display ${Math.round(display.w)}×${Math.round(display.h)} → ${targetMax || 'native'}px${slow}`
-        : `Image ${i + 1}/${imageEls.length}: native (display size unknown)${slow}`;
-
-      try {
-        const beforeBytes = Math.floor(currentHref.length * 3 / 4);
-        const result = await recompressDataUri(currentHref, quality, targetMax, format);
-        const webpUri = result.dataUri;
-        const afterBytes = Math.floor(webpUri.length * 3 / 4);
-        const mime = webpUri.slice(5, webpUri.indexOf(';'));
-        console.log(
-          `img ${i + 1}: native=${result.naturalW}x${result.naturalH}, display=${display ? Math.round(display.w)+'x'+Math.round(display.h) : '?'}, target=${targetMax || 'native'}, out=${result.outW}x${result.outH}, ${mime}, ${formatBytes(beforeBytes)} -> ${formatBytes(afterBytes)}`
-        );
-        el.setAttribute('href', webpUri);
+        const { dataUri: newHref, outW, outH } = result;
+        el.setAttribute('href', newHref);
         el.removeAttributeNS('http://www.w3.org/1999/xlink', 'href');
+
+        const afterBytes = Math.floor(newHref.length * 3 / 4);
+        const outMime = newHref.slice(5, newHref.indexOf(';'));
+        console.log(
+          `img ${i + 1}: ${sampleNodeName}, native=${nativeW}x${nativeH}, target=${targetMax || 'native'} × zoom ${zoom.toFixed(2)} = ${adjustedMax || 'native'}, out=${outW}x${outH} ${outMime}, ${formatBytes(afterBytes)}`
+        );
         replaced++;
-      } catch (e) {
-        console.warn('Failed to recompress image', i, e);
       }
-    }
     } catch (e) {
       console.error('processAndDownload failed:', e);
       statusEl.textContent = '⚠ Error: ' + (e && e.message ? e.message : String(e));
       exportBtn.disabled = false;
       throw e;
-    } finally {
-      try { unmount(); } catch (_) {}
     }
 
     const serializer = new XMLSerializer();
-    const webpSvg = serializer.serializeToString(svgRoot);
-    const webpSize = new Blob([webpSvg]).size;
+    const preSvgoSvg = serializer.serializeToString(svgRoot);
+    const preSvgoSize = new Blob([preSvgoSvg]).size;
 
     statusEl.textContent = 'Running SVGO...';
-    const finalSvg = await runSvgo(webpSvg, pendingDetail);
+    const finalSvg = await runSvgo(preSvgoSvg, detail);
     const optimizedSize = new Blob([finalSvg]).size;
 
-    // Show stats
     document.getElementById('origSize').textContent = formatBytes(originalSize);
-    document.getElementById('webpSize').textContent = formatBytes(webpSize);
+    document.getElementById('webpSize').textContent = formatBytes(preSvgoSize);
     document.getElementById('optSize').textContent = formatBytes(optimizedSize);
-    const pct = ((1 - optimizedSize / originalSize) * 100);
+    const pct = (1 - optimizedSize / originalSize) * 100;
     document.getElementById('savings').textContent =
       pct > 0 ? `${pct.toFixed(1)}% smaller` : `${Math.abs(pct).toFixed(1)}% larger`;
     document.getElementById('imgCount').textContent = replaced;
     statsEl.classList.add('visible');
 
-    // Trigger download
     const blob = new Blob([finalSvg], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -365,90 +349,6 @@
       statusEl.textContent = '⚠ SVGO error, using un-optimized SVG: ' + e.message;
       return svgString;
     }
-  }
-
-  // Mount an SVG temporarily off-screen so we can use the native getBBox()
-  // API. Returns a function to unmount it. We hide via visibility + size
-  // 0 to avoid any flicker.
-  function mountSvgForMeasure(svgElement) {
-    const host = document.createElement('div');
-    host.style.cssText =
-      'position:absolute;left:-99999px;top:-99999px;width:0;height:0;overflow:hidden;visibility:hidden;';
-    host.appendChild(svgElement);
-    document.body.appendChild(host);
-    return () => document.body.removeChild(host);
-  }
-
-  // Find every element that references this <image> via a <pattern>, and
-  // return the largest bounding box among them (the biggest on-screen
-  // instance). Uses getBBox() so weird Figma structures, transforms,
-  // clips, and path consumers all Just Work.
-  function measureMaxDisplaySize(svgRoot, imageEl) {
-    const imgId = imageEl.getAttribute('id');
-    if (!imgId) return null;
-
-    // Collect all patterns whose <use> references this image
-    const patterns = [];
-    const allPatterns = svgRoot.querySelectorAll('pattern');
-    for (const pattern of allPatterns) {
-      const uses = pattern.querySelectorAll('use');
-      for (const use of uses) {
-        const href =
-          use.getAttribute('href') ||
-          use.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
-        if (href === '#' + imgId) {
-          patterns.push(pattern.getAttribute('id'));
-          break;
-        }
-      }
-    }
-
-    let maxW = 0, maxH = 0, measured = 0;
-    // For each referencing pattern, find all its consumers and getBBox() them
-    for (const patId of patterns) {
-      if (!patId) continue;
-      const refUrl = 'url(#' + patId + ')';
-      const all = svgRoot.querySelectorAll('*');
-      for (const el of all) {
-        const f = el.getAttribute('fill') || '';
-        const s = el.getAttribute('stroke') || '';
-        const style = el.getAttribute('style') || '';
-        if (f !== refUrl && s !== refUrl && !style.includes(refUrl)) continue;
-        try {
-          const bb = el.getBBox();
-          // getBBox() is in the element's own user space; multiply the four
-          // corners through getCTM() so ancestor transforms (scale, rotate,
-          // nested <g>) are included. Without this, a fill inside e.g.
-          // <g transform="scale(3)"> measures at 1/3 its true rendered size
-          // and the bitmap gets downsampled 3× too aggressively.
-          const ctm = el.getCTM();
-          if (!ctm) continue;
-          const corners = [
-            [bb.x,            bb.y],
-            [bb.x + bb.width, bb.y],
-            [bb.x,            bb.y + bb.height],
-            [bb.x + bb.width, bb.y + bb.height],
-          ];
-          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-          for (const [x, y] of corners) {
-            const tx = ctm.a * x + ctm.c * y + ctm.e;
-            const ty = ctm.b * x + ctm.d * y + ctm.f;
-            if (tx < minX) minX = tx;
-            if (tx > maxX) maxX = tx;
-            if (ty < minY) minY = ty;
-            if (ty > maxY) maxY = ty;
-          }
-          const w = maxX - minX;
-          const h = maxY - minY;
-          if (w > maxW) maxW = w;
-          if (h > maxH) maxH = h;
-          measured++;
-        } catch (e) { /* off-screen nodes may throw */ }
-      }
-    }
-
-    if (!measured || !maxW || !maxH) return null;
-    return { w: maxW, h: maxH };
   }
 
   // Probe whether we can encode this mime. Cached because the answer
@@ -519,6 +419,86 @@
     );
     if (!out) throw new Error('AVIF encoding returned no output');
     return out;
+  }
+
+  // Compute the pattern zoom factor for an <image> element, defined as
+  // max(|Tx|·nativeW, |Ty|·nativeH, 1) where Tx, Ty are the magnitudes of
+  // the <use transform>'s first two column vectors. If the result is > 1
+  // the image is "zoomed in" inside the pattern and we need that many
+  // extra native pixels to keep the visible slice sharp.
+  function computePatternZoom(svgRoot, imageEl, nativeW, nativeH) {
+    const imgId = imageEl.getAttribute('id');
+    if (!imgId) return 1;
+    const ref = '#' + imgId;
+    let zoom = 1;
+    const uses = svgRoot.querySelectorAll('use');
+    for (const u of uses) {
+      const href = u.getAttribute('href') ||
+        u.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+      if (href !== ref) continue;
+      const m = readMatrix(u);
+      if (!m) continue;
+      const zx = Math.hypot(m.a, m.b) * nativeW;
+      const zy = Math.hypot(m.c, m.d) * nativeH;
+      const z = Math.max(zx, zy);
+      if (z > zoom) zoom = z;
+    }
+    return zoom;
+  }
+
+  // Parse a transform attribute into a composed affine matrix. We walk
+  // the function list left-to-right and multiply — supports matrix(),
+  // scale(), translate(), rotate() since Figma's SVG output can pick any
+  // of them. (transform.baseVal.consolidate() doesn't reliably work on
+  // DOMParser'd SVGs that aren't mounted in the live document.)
+  function readMatrix(el) {
+    const t = el.getAttribute('transform');
+    if (!t) return null;
+    const fnRe = /(matrix|translate|scale|rotate)\s*\(([^)]*)\)/g;
+    let M = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    let any = false;
+    let m;
+    while ((m = fnRe.exec(t)) !== null) {
+      const name = m[1];
+      const args = m[2].split(/[,\s]+/).map(parseFloat).filter(v => !isNaN(v));
+      let N;
+      if (name === 'matrix' && args.length === 6) {
+        N = { a: args[0], b: args[1], c: args[2], d: args[3], e: args[4], f: args[5] };
+      } else if (name === 'scale') {
+        const sx = args[0];
+        const sy = args.length > 1 ? args[1] : sx;
+        N = { a: sx, b: 0, c: 0, d: sy, e: 0, f: 0 };
+      } else if (name === 'translate') {
+        N = { a: 1, b: 0, c: 0, d: 1, e: args[0] || 0, f: args[1] || 0 };
+      } else if (name === 'rotate') {
+        const r = (args[0] || 0) * Math.PI / 180;
+        const cos = Math.cos(r), sin = Math.sin(r);
+        N = { a: cos, b: sin, c: -sin, d: cos, e: 0, f: 0 };
+      } else continue;
+      // Compose M = M × N
+      M = {
+        a: M.a * N.a + M.c * N.b,
+        b: M.b * N.a + M.d * N.b,
+        c: M.a * N.c + M.c * N.d,
+        d: M.b * N.c + M.d * N.d,
+        e: M.a * N.e + M.c * N.f + M.e,
+        f: M.b * N.e + M.d * N.f + M.f,
+      };
+      any = true;
+    }
+    return any ? M : null;
+  }
+
+  // Identify the bitmap format from magic bytes. Figma stores images as
+  // whatever was uploaded (PNG/JPEG/GIF/WebP); setting the right MIME on
+  // the Blob makes <img> decoding reliable across browsers.
+  function sniffImageMime(bytes) {
+    if (!bytes || bytes.length < 12) return 'application/octet-stream';
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return 'image/gif';
+    if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[8] === 0x57 && bytes[9] === 0x45) return 'image/webp';
+    return 'application/octet-stream';
   }
 
   function bytesToBase64(bytes) {
