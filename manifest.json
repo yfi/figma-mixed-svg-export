@@ -1,14 +1,12 @@
 {
   "name": "SVG Export with Optimized Bitmaps",
-  "id": "svg-export-optimized-bitmaps",
+  "id": "1626765063717728630",
+  "networkAccess": { "allowedDomains": ["none"] },
   "api": "1.0.0",
   "main": "code.js",
   "ui": "ui.html",
   "capabilities": [],
+  "documentAccess": "dynamic-page",
   "enableProposedApi": false,
-  "editorType": ["figma"],
-  "networkAccess": {
-    "allowedDomains": ["https://esm.sh"],
-    "reasoning": "Loads SVGO to optimize exported SVGs."
-  }
+  "editorType": ["figma"]
 }

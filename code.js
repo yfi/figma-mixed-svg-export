@@ -20,7 +20,7 @@ async function runExport(quality, requestedScale) {
   // Export the entire selection as SVG
   let svgString;
   try {
-    const svgBytes = await root.exportAsync({ format: 'SVG' });
+    const svgBytes = await root.exportAsync({ format: 'SVG', svgIdAttribute: true });
     // Decode in chunks to avoid call stack overflow on large exports
     const chunks = [];
     const CHUNK = 8192;
